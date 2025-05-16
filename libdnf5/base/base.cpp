@@ -38,6 +38,12 @@ along with libdnf.  If not, see <https://www.gnu.org/licenses/>.
 #include "libdnf5/conf/config_parser.hpp"
 #include "libdnf5/conf/const.hpp"
 #include "libdnf5/utils/bgettext/bgettext-mark-domain.h"
+#include "libdnf5/utils/bootc.hpp"
+
+#include <assert.h>
+#include <unistd.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
 
 #include <atomic>
 #include <cstdlib>
@@ -45,6 +51,87 @@ along with libdnf.  If not, see <https://www.gnu.org/licenses/>.
 #include <mutex>
 #include <string_view>
 #include <vector>
+
+#define MOUNT_CMD "/bin/mount"
+
+int
+run_cmd(const std::string & cmd, const std::vector<std::string> & args)
+{
+    std::vector<char *> c_args;
+
+    c_args.emplace_back(const_cast<char *>(cmd.c_str()));
+
+    for (const auto & arg : args) {
+        c_args.emplace_back(const_cast<char *>(arg.c_str()));
+    }
+
+    c_args.emplace_back(nullptr);
+
+    const auto pid = fork();
+
+    if (pid == -1) {
+        return -1;
+    } else if (pid == 0) {
+        int rc = execvp(cmd.c_str(), c_args.data());
+        exit(rc == 0 ? 0 : -1);
+    } else {
+        int status;
+        int rc = waitpid(pid, &status, 0);
+
+        if (rc == -1) {
+            return -1;
+        } else if (WIFEXITED(status)) {
+            return WEXITSTATUS(status);
+        } else if (WIFSIGNALED(status)) {
+            return 128 + WTERMSIG(status);
+        }
+
+        return -1;
+    }
+}
+
+int
+mkdirp(const char*path, mode_t mode)
+{
+    int r = 0;
+    char *p = NULL;
+    char *start = NULL;
+    struct stat sb;
+
+    assert(path != NULL);
+    assert(*path == '/');
+
+    start = p = strdup(path);
+    p++;
+
+    // handle all the parent directories
+    while (*p != '\0') {
+        if (*p == '/') {
+            *p = '\0';
+            r = stat(start, &sb);
+
+            if (r == 0 && S_ISDIR(sb.st_mode)) {
+                *p = '/';
+                p++;
+                continue;
+            } else if (mkdir(start, mode) == -1) {
+                return -1;
+            }
+
+            *p = '/';
+        }
+
+        p++;
+    }
+
+    // final directory
+    if ((stat(start, &sb) != 0) && (mkdir(start, mode) == -1)) {
+        return -1;
+    }
+
+    free(start);
+    return 0;
+}
 
 namespace fs = std::filesystem;
 
@@ -181,6 +268,7 @@ void Base::setup() {
     // Resolve installroot configuration
     std::string vars_installroot{"/"};
     const std::filesystem::path installroot_path{p_impl->config.get_installroot_option().get_value()};
+    const bool with_mounts{p_impl->config.get_with_mounts_option().get_value()};
     if (!p_impl->config.get_use_host_config_option().get_value()) {
         // Prepend installroot to each reposdir and varsdir
         std::vector<std::string> installroot_reposdirs;
@@ -212,6 +300,11 @@ void Base::setup() {
         const std::filesystem::path system_cachedir_path{p_impl->config.get_system_cachedir_option().get_value()};
         const auto full_path = installroot_path / system_cachedir_path.relative_path();
         p_impl->config.get_system_cachedir_option().set(Option::Priority::INSTALLROOT, full_path.string());
+    }
+
+    // in bootc and have with-mounts, mount specials
+    if (libdnf5::utils::bootc::is_bootc_system() && installroot_path != "/" && with_mounts) {
+        // XXX
     }
 
     // Add protected packages from files from installroot
