@@ -42,96 +42,21 @@ along with libdnf.  If not, see <https://www.gnu.org/licenses/>.
 
 #include <assert.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <errno.h>
+#include <err.h>
 
 #include <atomic>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <mutex>
 #include <string_view>
 #include <vector>
 
-#define MOUNT_CMD "/bin/mount"
-
-int
-run_cmd(const std::string & cmd, const std::vector<std::string> & args)
-{
-    std::vector<char *> c_args;
-
-    c_args.emplace_back(const_cast<char *>(cmd.c_str()));
-
-    for (const auto & arg : args) {
-        c_args.emplace_back(const_cast<char *>(arg.c_str()));
-    }
-
-    c_args.emplace_back(nullptr);
-
-    const auto pid = fork();
-
-    if (pid == -1) {
-        return -1;
-    } else if (pid == 0) {
-        int rc = execvp(cmd.c_str(), c_args.data());
-        exit(rc == 0 ? 0 : -1);
-    } else {
-        int status;
-        int rc = waitpid(pid, &status, 0);
-
-        if (rc == -1) {
-            return -1;
-        } else if (WIFEXITED(status)) {
-            return WEXITSTATUS(status);
-        } else if (WIFSIGNALED(status)) {
-            return 128 + WTERMSIG(status);
-        }
-
-        return -1;
-    }
-}
-
-int
-mkdirp(const char*path, mode_t mode)
-{
-    int r = 0;
-    char *p = NULL;
-    char *start = NULL;
-    struct stat sb;
-
-    assert(path != NULL);
-    assert(*path == '/');
-
-    start = p = strdup(path);
-    p++;
-
-    // handle all the parent directories
-    while (*p != '\0') {
-        if (*p == '/') {
-            *p = '\0';
-            r = stat(start, &sb);
-
-            if (r == 0 && S_ISDIR(sb.st_mode)) {
-                *p = '/';
-                p++;
-                continue;
-            } else if (mkdir(start, mode) == -1) {
-                return -1;
-            }
-
-            *p = '/';
-        }
-
-        p++;
-    }
-
-    // final directory
-    if ((stat(start, &sb) != 0) && (mkdir(start, mode) == -1)) {
-        return -1;
-    }
-
-    free(start);
-    return 0;
-}
+const std::filesystem::path PATH_TO_MOUNT{"/usr/bin/mount"};
 
 namespace fs = std::filesystem;
 
@@ -304,7 +229,101 @@ void Base::setup() {
 
     // in bootc and have with-mounts, mount specials
     if (libdnf5::utils::bootc::is_bootc_system() && installroot_path != "/" && with_mounts) {
-        // XXX
+        std::vector<std::string> dirs = {"run", "proc", "sys", "dev", "var", "tmp"};
+        std::vector<std::string> tmpfsvols = {"run", "tmp", "dev"};
+        std::vector<std::string> hostdevs = {"null" "zero" "full" "urandom" "tty"};
+        auto tpath = installroot_path;
+        int fd = -1;
+
+        // create any required top level directories
+        for (auto dir : dirs) {
+            tpath = installroot_path / dir;
+            mode_t mode = S_IRWXU|S_IRGRP|S_IXGRP|S_IROTH|S_IXOTH;
+
+            if (dir == "tmp") {
+                // set 1777 for mode on /tmp
+                mode = S_ISVTX|S_IRWXU|S_IRWXG|S_IRWXO;
+            }
+
+            if (libdnf5::utils::fs::mkdirp(tpath.c_str(), mode)) {
+                libdnf_throw_assertion("mkdir(2) failure: {}", strerror(errno));
+            }
+        }
+
+        // mount tmpfs filesystems
+        for (auto dir : tmpfsvols) {
+            tpath = installroot_path / dir;
+
+            if (libdnf5::utils::proc::call(PATH_TO_MOUNT, {"-t", "tmpfs", "tmpfs", tpath})) {
+                libdnf_throw_assertion("libdnf5::utils::proc::call() failure: {}", strerror(errno));
+            }
+
+            if (dir == "tmp") {
+                if (chmod(tpath.c_str(), S_ISVTX|S_IRWXU|S_IRWXG|S_IRWXO)) {
+                    libdnf_throw_assertion("chmod(2) failure: {}", strerror(errno));
+                }
+            }
+        }
+
+        // some things (e.g., authselect) rely on this mount
+        tpath = installroot_path / "run/ostree-booted";
+        fd =  open(tpath.c_str(), O_WRONLY, O_CREAT, S_IRUSR|S_IWUSR|S_IRGRP|S_IROTH);
+
+        if (fd == -1) {
+            warn("open");
+        }
+
+        if (close(fd) < 0) {
+            warn("close");
+        }
+
+        // bind mount /proc
+        tpath = installroot_path / "proc";
+
+        if (libdnf5::utils::proc::call(PATH_TO_MOUNT, {"--bind", "/proc", tpath})) {
+            libdnf_throw_assertion("libdnf5::utils::proc::call() failure: {}", strerror(errno));
+        }
+
+        // pull in host devices
+        for (auto node : hostdevs) {
+            std::string hostdev = std::format("/dev/{}", node);
+
+            // create the node if it does not exist
+            tpath = installroot_path / "dev" / node;
+            fd = open(tpath.c_str(), O_WRONLY, O_CREAT, S_IRUSR|S_IWUSR|S_IRGRP|S_IROTH);
+
+            if (fd == -1) {
+                warn("open");
+            }
+
+            if (close(fd) < 0) {
+                warn("close");
+            }
+
+            // bind mount it from the host
+            if (libdnf5::utils::proc::call(PATH_TO_MOUNT, {"--bind", hostdev, tpath})) {
+                libdnf_throw_assertion("libdnf5::utils::proc::call() failure: {}", strerror(errno));
+            }
+        }
+
+        // add default symlinks
+        tpath = installroot_path / "dev/stdin";
+
+        if (symlink(tpath.c_str(), "/proc/self/fd/0")) {
+            libdnf_throw_assertion("libdnf5::utils::proc::call() failure: {}", strerror(errno));
+        }
+
+        tpath = installroot_path / "dev/stdout";
+
+        if (symlink(tpath.c_str(), "/proc/self/fd/1")) {
+            libdnf_throw_assertion("libdnf5::utils::proc::call() failure: {}", strerror(errno));
+        }
+
+        tpath = installroot_path / "dev/stderr";
+
+        if (symlink(tpath.c_str(), "/proc/self/fd/2")) {
+            libdnf_throw_assertion("libdnf5::utils::proc::call() failure: {}", strerror(errno));
+        }
     }
 
     // Add protected packages from files from installroot

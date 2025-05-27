@@ -45,7 +45,7 @@ call(const std::string & command, const std::vector<std::string> & args)
     }
     if (pid == 0) {
         int rc = execvp(command.c_str(), c_args.data());
-        exit(rc == 0 ? 0 : -1);
+        _exit(rc == 0 ? 0 : -1);
     } else {
         int status;
         int rc = waitpid(pid, &status, 0);
