@@ -228,8 +228,8 @@ void Base::setup() {
         p_impl->config.get_system_cachedir_option().set(Option::Priority::INSTALLROOT, full_path.string());
     }
 
-    // in bootc and have with-mounts, mount specials
-    if (libdnf5::utils::bootc::is_bootc_system() && installroot_path != "/" && with_mounts) {
+    // have with-mounts, mount specials
+    if (installroot_path != "/" && with_mounts) {
         std::vector<std::string> dirs = {"run", "proc", "sys", "dev", "var", "tmp"};
         std::vector<std::string> tmpfsvols = {"run", "tmp", "dev"};
         std::vector<std::string> hostdevs = {"null" "zero" "full" "urandom" "tty"};
@@ -255,7 +255,7 @@ void Base::setup() {
         for (auto dir : tmpfsvols) {
             tpath = installroot_path / dir;
 
-            if (libdnf5::utils::proc::call(PATH_TO_MOUNT, {"-t", "tmpfs", "tmpfs", tpath})) {
+            if (libdnf5::utils::proc::call(PATH_TO_MOUNT, {"-t", "tmpfs", "tmpfs", tpath.c_str()})) {
                 libdnf_throw_assertion("libdnf5::utils::proc::call() failure: {}", strerror(errno));
             }
 
@@ -281,7 +281,7 @@ void Base::setup() {
         // bind mount /proc
         tpath = installroot_path / "proc";
 
-        if (libdnf5::utils::proc::call(PATH_TO_MOUNT, {"--bind", "/proc", tpath})) {
+        if (libdnf5::utils::proc::call(PATH_TO_MOUNT, {"--bind", "/proc", tpath.c_str()})) {
             libdnf_throw_assertion("libdnf5::utils::proc::call() failure: {}", strerror(errno));
         }
 
@@ -302,7 +302,7 @@ void Base::setup() {
             }
 
             // bind mount it from the host
-            if (libdnf5::utils::proc::call(PATH_TO_MOUNT, {"--bind", hostdev, tpath})) {
+            if (libdnf5::utils::proc::call(PATH_TO_MOUNT, {"--bind", hostdev.c_str(), tpath.c_str()})) {
                 libdnf_throw_assertion("libdnf5::utils::proc::call() failure: {}", strerror(errno));
             }
         }
