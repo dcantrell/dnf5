@@ -39,6 +39,7 @@ along with libdnf.  If not, see <https://www.gnu.org/licenses/>.
 #include "libdnf5/conf/const.hpp"
 #include "libdnf5/utils/bgettext/bgettext-mark-domain.h"
 #include "libdnf5/utils/bootc.hpp"
+#include "libdnf5/utils/proc.hpp"
 
 #include <assert.h>
 #include <unistd.h>
